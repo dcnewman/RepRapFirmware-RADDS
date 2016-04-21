@@ -1,0 +1,257 @@
+import os
+import re
+import glob
+from os.path import dirname, basename, join
+from datetime import datetime
+
+import sys
+sys.path.append('../../scons_tools')
+from platforms import *
+from libraries import *
+
+# Platform type; default to 'duet'
+
+platform = ARGUMENTS.get('platform', 'duet')
+
+if not (platform in platforms):
+    print "Platform " + platform + " is not currently supported"
+    exit()
+
+target_name = 'RepRapFirmware-' + platform
+hex_name = target_name + '.bin'
+elf_name = target_name + '.elf'
+map_name = target_name + '.map'
+
+# Get platform-specific information
+
+features = platforms[platform]
+
+# Arduino path information from os.environ.  Likely set in SConstruct
+
+coreduet_home = os.environ['COREDUET_HOME']
+gccarm_bin = os.environ['GCCARM_BIN']
+bossac_path = os.environ['BOSSAC_PATH']
+
+# Building webserver support?
+
+if 'defines' in features:
+    f = features['defines']
+    webserver = 'WEBSERVER' in features['defines']
+else:
+    webserver = False
+
+# Pins file
+
+if 'pins' in features:
+    pinfile = features['pins']
+else:
+    pinfile = 'Pins_' + platform.lower() + '.h'
+
+# Programming port (for upload function)
+if 'program_port' in features:
+    program_port = features['program_port'].lower()
+    if program_port == 'programming':
+        native = 'false'
+    else:
+        native = 'true'
+else:
+    native = 'true'
+
+# Platform specific #defines
+
+flags = []
+if 'defines' in features:
+    for d in features['defines']:
+        if d[0] != '-':
+            flags.append('-D' + d)
+        else:
+            flags.remove('-D' + d[1:])
+
+# Extra defines from the command line
+
+defines = ARGUMENTS.get('defines', '')
+if defines != '':
+    defines = defines.replace(' ', '').split(',')
+    for d in defines:
+        if d != '':
+            flags.append('-D' + d)
+
+# Local libraries to use from src/Libraries/
+
+if 'libraries' in features:
+    local_libraries = features['libraries']
+else:
+    local_libraries = []
+
+# And sublibraries to use from the CoreDuet library
+if 'arduino_libraries' in features:
+    arduino_libraries = features['arduino_libraries']
+else:
+    arduino_libraries = []
+
+# Build up our list of include paths from the board's
+# list of required local libraries.  Later, we'll walk
+# local_libraries again to find our source dependencies
+
+include_paths = []
+
+# Add in the include paths for the cited Arduino libraries (no op for 'core')
+for lib in arduino_libraries:
+    append_arduino_path(lib, include_paths, coreduet_home)
+
+# Add in the include paths for Arduino libraries needed by local libraries
+for lib in local_libraries:
+    if lib in build_libraries:
+        if not (build_libraries[lib][3] is None):
+            alibs = build_libraries[lib][3]
+            for alib in alibs:
+                append_arduino_path(alib, include_paths, coreduet_home)
+
+# Now add in the include paths for local libraries
+for lib in local_libraries:
+    if lib in build_libraries:
+        append_paths(include_paths, lib, build_libraries[lib][0])
+include_paths.append('.')
+
+
+######
+#
+# Firmware upload method and psuedo-target (optional target) "upload"
+#
+def Upload(env, source, name="upload"):
+
+    def tickle(target, source, env):
+        import serial
+        import time
+
+        port = env['PORT']
+        print 'Tickling the bootloader via port ' + port
+        try:
+            with serial.Serial(port, baudrate=1200) as sd:
+                sd.setDTR(1)
+                time.sleep(0.5)
+                sd.setDTR(0)
+        except serial.SerialException, e:
+            return str(e)
+
+        if 'NATIVE' in env:
+            native = env['NATIVE'].lower()
+        else:
+            native = 'true'
+
+    cmd = env['UPLOAD']
+    cmd = cmd.replace('$NATIVE', native)
+    cmd = cmd.replace('$PORT', env['PORT'].replace('/dev/', ''))
+    target = env.Alias(name, source, [tickle, cmd])
+    AlwaysBuild(target)
+    return target
+
+
+AddMethod(Environment, Upload)
+
+# Initialize an environment
+
+env = Environment(tools=['default', 'ar', 'g++', 'gcc'],
+                  CPPPATH=include_paths,
+                  LIBPATH=['.'],
+                  VARIANT_DIR=join('build', platform))
+
+# Compiler flags shared by C and C++
+env.Replace(CCFLAGS=[
+    '-c', '-Dprintf=iprintf', '-D__SAM3X8E__', '-DF_CPU=84000000L',
+    '-DARDUINO=158', '-DUSB_VID=0x2341', '-DUSB_PID=0x003e', '-DUSBCON',
+    '-DUSB_MANUFACTURER="Unknown"', '-DUSB_PRODUCT=\\"Arduino Due\\"',
+    '-DPLATFORM=' + platform.lower(), '-DDATE=\'"' + datetime.now().strftime(
+        '%y/%m/%d') + '"\''
+])
+if flags != []:
+    env.Append(CCFLAGS=flags)
+
+# C compiler flags
+env.Replace(CFLAGS=[
+    '-ffunction-sections', '-fdata-sections', '-nostdlib', '--param',
+    'max-inline-insns-single=500', '-mcpu=cortex-m3', '-O3', '-Wall',
+    '-std=gnu99', '-mthumb'
+])
+
+# C++ flags
+env.Replace(CXXFLAGS=[
+    '-ffunction-sections', '-fdata-sections', '-nostdlib',
+    '-fno-threadsafe-statics', '--param', 'max-inline-insns-single=500',
+    '-fno-rtti', '-fno-exceptions', '-Dprintf=iprintf', '-mcpu=cortex-m3',
+    '-O2', '-Wall', '-std=gnu++11', '-mthumb'
+])
+
+env.SetDefault(COREDUET_HOME=coreduet_home)
+env.SetDefault(GCCARM_BIN=gccarm_bin)
+env.SetDefault(BOSSAC_PATH=bossac_path)
+
+env.Replace(RANLIB="$GCCARM_BIN/arm-none-eabi-ranlib")
+env.Replace(CC="$GCCARM_BIN/arm-none-eabi-gcc")
+env.Replace(CXX="$GCCARM_BIN/arm-none-eabi-g++")
+env.Replace(AR="$GCCARM_BIN/arm-none-eabi-ar")
+env.Replace(ARFLAGS="rcs")
+env.Replace(ASFLAGS="-c -g -x assembler-with-cpp")
+env.Replace(SIZE="$GCCARM_BIN/arm-none-eabi-size")
+env.Replace(OBJCOPY="$GCCARM_BIN/arm-none-eabi-objcopy")
+env.Replace(ELF="$GCCARM_BIN/arm-none-eabi-gcc")
+env.Replace(LD="$GCCARM_BIN/arm-none-eabi-gcc")
+
+env.Append(BUILDERS={'Elf': Builder(
+    action=
+    '"$GCCARM_BIN/arm-none-eabi-gcc" -Os -Wl,--gc-sections -mcpu=cortex-m3 "-T$COREDUET_HOME/variants/duet/linker_scripts/gcc/flash.ld" "-Wl,-Map,$VARIANT_DIR/RepRapFirmware.map"  -o $TARGET $_LIBDIRFLAGS -mthumb -Wl,--cref -Wl,--check-sections -Wl,--gc-sections -Wl,--entry=Reset_Handler -Wl,--unresolved-symbols=report-all -Wl,--warn-common -Wl,--warn-section-align -Wl,--warn-unresolved-symbols -Wl,--start-group $COREDUET_HOME/build/' + platform + '/cores/arduino/syscalls.o $_LIBFLAGS $SOURCES  -Wl,--end-group -lm -gcc')
+                    })
+
+env.Append(BUILDERS={'Hex': Builder(
+    action='"$GCCARM_BIN/arm-none-eabi-objcopy" -O binary  $SOURCES $TARGET',
+    suffix='.hex',
+    src_suffix='.elf')})
+
+env.Replace(
+    UPLOAD='"$BOSSAC_PATH" --port=$PORT -U $NATIVE -e -w -v -b $SOURCES -R')
+
+env['map_name'] = map_name
+env['NATIVE'] = native
+
+# Work on our list of local source dependencies
+
+exclude_srcs = []
+if not webserver:
+    exclude_srcs += ['Network.cpp', 'Webserver.cpp']
+
+srcs = Glob('*.cpp', exclude=exclude_srcs) + Glob('*.c', exclude=exclude_srcs)
+
+# And our list of local library dependencies
+
+for lib in local_libraries:
+    subdirs = get_lib_dirs(lib)
+    for subdir in subdirs:
+        srcs += Glob(os.path.join(subdir, '*.cpp'))
+    for subdir in subdirs:
+        srcs += Glob(os.path.join(subdir, '*.c'))
+
+# Declare these sources as dependencies
+
+objs = env.Object(srcs)
+
+# Add the Pin_<platform>.h file to the dependency list
+
+env.Depends(objs, pinfile)
+
+# Now start our list of library dependencies
+# Head the list of with the objects built from our local source dependencies
+
+depends = [objs]
+
+# Finally, the .elf and .bin files
+env.Elf(elf_name,
+        depends,
+        LIBS=['Core' + platform.title()],
+        LIBPATH=['$COREDUET_HOME/Release'])
+hex = env.Hex(hex_name, elf_name)
+
+# Add an optional 'upload' build target
+
+port = ARGUMENTS.get('port', '')
+env['PORT'] = port
+env.Upload(hex)
