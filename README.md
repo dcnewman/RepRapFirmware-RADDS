@@ -1,4 +1,4 @@
-*** This repository is based upon https://github.com/dc42/RepRapFirmware and is a port to RADDS of the RepRapFirmware.  All work by dcnewman on this repository was suspended on April 21, 2016. ***
+__This repository is based upon https://github.com/dc42/RepRapFirmware and is a port to RADDS of the RepRapFirmware.  All work by dcnewman on this repository was suspended on April 21, 2016.__
 
 ## 1.0 Introduction
 
