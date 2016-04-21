@@ -1,3 +1,5 @@
+*** This repository is based upon https://github.com/dc42/RepRapFirmware and is a port to RADDS of the RepRapFirmware.  All work by dcnewman on this repository was suspended on April 21, 2016. ***
+
 ## 1.0 Introduction
 
 _This `README.md` file is a slightly updated version of the original
